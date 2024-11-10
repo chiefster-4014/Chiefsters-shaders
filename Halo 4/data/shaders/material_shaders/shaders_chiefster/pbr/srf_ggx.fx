@@ -11,26 +11,32 @@ by chiefster with help from chunch.
 
 
 
-DECLARE_SAMPLER(color, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
+DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
 
 #if defined(H5_SUPPORT)
-	DECLARE_SAMPLER(masks, "Control Map", "", "chiefster/bitmaps/default_control.bitmap")
+	DECLARE_SAMPLER(control_map, "Control Map", "", "chiefster/bitmaps/default_control.bitmap")
+	#include "next_texture.fxh"
 #elif defined(H2AMP_SUPPORT)
-	DECLARE_SAMPLER(masks, "Combo Map", "", "chiefster/bitmaps/default_combo.bitmap")
+	DECLARE_SAMPLER(control_map, "Combo Map", "", "chiefster/bitmaps/default_combo.bitmap")
+	#include "next_texture.fxh"
 #elif defined(COLORED_SPEC)
-	DECLARE_SAMPLER(masks, "Colored Specular Map", "", "shaders/default_bitmaps/bitmaps/default_spec.bitmap")
+	DECLARE_SAMPLER(control_map, "Colored Specular Map", "", "shaders/default_bitmaps/bitmaps/default_spec.bitmap")
+	#include "next_texture.fxh"
+	DECLARE_SAMPLER(ao_map, "AO Map", "", "shaders/default_bitmaps/bitmaps/color_white.bitmap")
+	#include "next_texture.fxh"
 #else
-	DECLARE_SAMPLER(masks, "PBR ORM Map", "", "chiefster/bitmaps/default_orm.bitmap")
+	DECLARE_SAMPLER(control_map, "PBR ORM Map", "", "chiefster/bitmaps/default_orm.bitmap")
+	#include "next_texture.fxh"
 #endif
-#include "next_texture.fxh"
+
 
 #if defined(CHANGE_COLOR)
 	DECLARE_SAMPLER(cc_map, "Color Change Map", "", "shaders/default_bitmaps/bitmaps/default_diff.tif")
 	#include "next_texture.fxh"
 #endif
 
-DECLARE_SAMPLER(norm, "Normal Map", "", "shaders/default_bitmaps/bitmaps/default_normal.bitmap")
+DECLARE_SAMPLER(normal_map, "Normal Map", "", "shaders/default_bitmaps/bitmaps/default_normal.bitmap")
 #include "next_texture.fxh"
 DECLARE_SAMPLER_CUBE(reflection_map, "Reflection Map", "", "shaders/default_bitmaps/bitmaps/default_cube.tif")
 #include "next_texture.fxh"
@@ -87,8 +93,10 @@ DECLARE_FLOAT_WITH_DEFAULT(detail_normal_intensity,		"", "detail_normals", 0, 1.
 		#include "used_float.fxh"
 	#endif
 
-
-
+	#if defined(ALPHA_CLIP)
+		DECLARE_FLOAT_WITH_DEFAULT(clip_threshold,		"", "", 0, 1.0, float(0.3));
+		#include "used_float.fxh"
+	#endif
 struct s_shader_data
 {
 	s_common_shader_data common;
@@ -101,42 +109,24 @@ void pixel_pre_lighting(
 {
 	float2 uv = pixel_shader_input.texcoord.xy;
 
-    float2 color_uv    = transform_texcoord(uv, color_transform);
-	shader_data.common.albedo = sample2DGamma(color, color_uv);
+	shader_data.common.albedo = sample2DGamma(color_map, transform_texcoord(uv, color_map_transform));
 	shader_data.common.albedo.rgb *= pow(surface_color_tint, .454545);	//power to fix h4 color gamma correction
 
-    float2 normal_uv    = transform_texcoord(uv, norm_transform);
-     shader_data.common.normal = sample_2d_normal_approx(norm, normal_uv);
-	shader_data.common.normal = mul(shader_data.common.normal, shader_data.common.tangent_frame);
+	float4 pbr_masks = sample2DGamma(control_map, transform_texcoord(uv, control_map_transform));
 
-	float2 masks_uv    = transform_texcoord(uv, masks_transform);
-	float4 pbr_masks = sample2DGamma(masks, masks_uv);
-
-
-		//define supported mask type
-	#if defined(H5_SUPPORT)
-	{
-		shader_data.shader_params.r	= pbr_masks.g;
-		shader_data.shader_params.g	= saturate((1 - pbr_masks.r) * roughness_scalar + roughness_bias);
-		shader_data.shader_params.b	= saturate(pbr_masks.b * metalness_scalar + metalness_bias);
-		#if defined(USE_FRESNEL_MASK)
-		{
-			shader_data.shader_params.a	= albedo.a;
-		}
-		#endif
-	}
-
-	#elif defined(H2AMP_SUPPORT) //same mask type as Unity for some reason
+	//define supported mask type
+	#if defined(H2AMP_SUPPORT) //same mask type as Unity standard for some reason
 	{
 		shader_data.shader_params.r	= pbr_masks.g;
 		shader_data.shader_params.g	= saturate((1 - pbr_masks.a) * roughness_scalar + roughness_bias);
-		shader_data.shader_params.b	= saturate(pbr_masks.r * metalness_scalar + metalness_bias);
+		shader_data.shader_params.b	= saturate(pbr_masks.r + metalness_bias);
 	}
 
 	#elif defined(COLORED_SPEC) //assumes spec-gloss
 	{
 		shader_data.shader_params.rgb = pbr_masks.rgb;
 		shader_data.shader_params.a = saturate((1 - pbr_masks.a) * roughness_scalar + roughness_bias);
+		shader_data.common.shaderValues.x = sample2DGamma(ao_map, transform_texcoord(uv, ao_map_transform)).g;
 	}
 
 	#else
@@ -151,22 +141,27 @@ void pixel_pre_lighting(
 		#endif
 	}
 	#endif
-
-
+	{//normal mapping
+		float3 base_normal = sample_2d_normal_approx(normal_map, transform_texcoord(uv, normal_map_transform));
 		if (detail_normals) //taken from srf_blinn.fx
 		{
 			// Composite detail normal map onto the base normal map
-			shader_data.common.normal = CompositeDetailNormalMap(shader_data.common.normal,
+			shader_data.common.normal = CompositeDetailNormalMap(base_normal,
 																 normal_detail_map,
 																 transform_texcoord(uv, normal_detail_map_transform),
 																 detail_normal_intensity);
 		}
+		else
+		{
+			shader_data.common.normal = base_normal;
+		}
+		shader_data.common.normal = mul(shader_data.common.normal, shader_data.common.tangent_frame);
+	}
 
 
 	#if defined(CHANGE_COLOR)
 	{
-		float2 cc_map_uv    = transform_texcoord(uv, cc_map_transform);
-		float4 cc_mask = sample2DGamma(cc_map, cc_map_uv);
+		float4 cc_mask = sample2DGamma(cc_map, transform_texcoord(uv, cc_map_transform));
 
 		float3 primary_cc = 1.0;
 		float3 secondary_cc = 1.0;
@@ -230,19 +225,18 @@ float4 pixel_lighting(
 
 	float NDV = saturate(dot((view_dir), normal));
  /*-------------------------------------------SHADER-------------------------------------------*/
-							
+
 	#if defined(COLORED_SPEC)
-		float3 metalness_color = lerp(shader_params.rgb, float3(1,1,1), pow(1-NDV, 5));
+		float3 metalness_color = max(shader_params.rgb, 0.1);
 	#else
-		//mix f0 and albedo by metalness, then mix that and 0.5 by NDV.
-		float3 metalness_color = lerp(lerp(float3(0.06,0.06,0.06), albedo.rgb, shader_params.b), float3(0.5,0.5,0.5), pow(1-NDV,5));
+		//mix f0 and albedo by metalness.
+		float3 metalness_color = lerp(float3(0.06,0.06,0.06), albedo.rgb, shader_params.b);
 	#endif
 
 	#if defined(USE_FRESNEL_MASK)
     {							//power to fix h4 color gamma correction 
 		float3 spec_colors = lerp(pow(normal_specular_tint, 0.454545), pow(glancing_specular_tint, 0.454545), pow(1-NDV, glancing_power)); //mix spec colors by view angle.
-		spec_colors = lerp(float3(1,1,1), spec_colors, shader_params.a); //mask spec colors by spec color mask.
-		metalness_color *= lerp(spec_colors, float3(1,1,1),  pow(1-NDV,5));
+		metalness_color = lerp(metalness_color, spec_colors, shader_params.a); //mask spec colors by spec color mask.
 	}
 	#endif
 
@@ -287,21 +281,24 @@ float4 pixel_lighting(
 
 	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= pow(shader_params.g, .21f) * 6.5; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
+	float lod				= pow(shader_params.g, .21f) * 6.5; // Exponential for smoother mip progression. scalar attempts to push into proper baked cube mip range. 
 	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-	float3 reflection		= diffuse * (reflectionMap.rgb * 4.59479) * reflectionMap.a * metalness_color; //4.59479 value is from H3's albedo.fx. thanks bungo
+	float3 reflection		= diffuse * (reflectionMap.rgb * 4.5) * reflectionMap.a * lerp(metalness_color, float3(0.5, 0.5, 0.5), pow(1-NDV,5));
 
  /*----------------------------------------FINAL OUTPUT----------------------------------------*/
 
 	float4 out_color;
 	#if defined(COLORED_SPEC)
 	{
-		out_color.rgb = (diffuse * albedo.rgb) + specular + reflection;
+		out_color.rgb = ((diffuse * albedo.rgb) + specular + reflection) * shader_data.common.shaderValues.x;
 	}
 	#else
 	{
 		out_color.rgb = ((diffuse * albedo.rgb * (1-shader_params.b)) + specular + reflection) * shader_params.r;
 	}
+	#endif
+	#if defined(ALPHA_CLIP)
+		clip(albedo.a - clip_threshold);
 	#endif
 	out_color.a = albedo.a;
 

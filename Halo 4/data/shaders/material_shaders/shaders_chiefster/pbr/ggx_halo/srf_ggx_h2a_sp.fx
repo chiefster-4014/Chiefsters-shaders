@@ -12,24 +12,13 @@ alternate version that tries to emulate H2ASP's wack shader.
 
 
 
-DECLARE_SAMPLER(color, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
+DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
-
-		#if defined(H5_SUPPORT)
-			DECLARE_SAMPLER(masks, "Control Map", "", "chiefster/bitmaps/default_control.bitmap")
-			#include "next_texture.fxh"
-		#elif defined(H2AMP_SUPPORT)
-			DECLARE_SAMPLER(masks, "Combo Map", "", "chiefster/bitmaps/default_combo.bitmap")
-			#include "next_texture.fxh"
-		#elif defined(COLORED_SPEC)
-			DECLARE_SAMPLER(masks, "Colored Specular Map", "", "shaders/default_bitmaps/bitmaps/default_spec.bitmap")
-			#include "next_texture.fxh"
-		#else
-			DECLARE_SAMPLER(masks, "PBR ORM Map", "", "chiefster/bitmaps/default_orm.bitmap")
-			#include "next_texture.fxh"
-		#endif
-
-DECLARE_SAMPLER(norm, "Normal Map", "", "shaders/default_bitmaps/bitmaps/default_normal.bitmap")
+DECLARE_SAMPLER(specular_map, "Colored Specular Map", "", "shaders/default_bitmaps/bitmaps/default_spec.bitmap")
+#include "next_texture.fxh"
+DECLARE_SAMPLER(normal_map, "Normal Map", "", "shaders/default_bitmaps/bitmaps/default_normal.bitmap")
+#include "next_texture.fxh"
+DECLARE_SAMPLER(normal_detail_map,		"Detail Normal Map", "detail_normals", "shaders/default_bitmaps/bitmaps/default_normal.tif");
 #include "next_texture.fxh"
 DECLARE_SAMPLER_CUBE(reflection_map, "Reflection Map", "", "shaders/default_bitmaps/bitmaps/default_cube.tif")
 #include "next_texture.fxh"
@@ -40,20 +29,14 @@ DECLARE_FLOAT_WITH_DEFAULT(roughness_scalar,	"", "", 0, 1.0, float(1.0));
 #include "used_float.fxh"
 DECLARE_FLOAT_WITH_DEFAULT(roughness_bias,		"", "", 0, 1.0, float(0.0));
 #include "used_float.fxh"
-
+DECLARE_FLOAT_WITH_DEFAULT(detail_normal_intensity,		"", "detail_normals", 0, 1.0, float(1.0));
+#include "used_float.fxh"
 	#if defined(SELFILLUM)
 		DECLARE_SAMPLER(selfillum, "Self-Illum Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 		#include "next_texture.fxh"
 		DECLARE_RGB_COLOR_WITH_DEFAULT(self_illum_color,	"", "", float3(1.0,1.0,1.0));
 		#include "used_float3.fxh"
 		DECLARE_FLOAT_WITH_DEFAULT(self_illum_intensity,		"", "", 0, 1.0, float(0.0));
-		#include "used_float.fxh"
-	#endif
-
-	#if defined(PARALLAX)
-		DECLARE_SAMPLER(height_map, "Height Map", "Height Map", "shaders/default_bitmaps/bitmaps/default_diff.tif")
-		#include "next_texture.fxh"
-		DECLARE_FLOAT_WITH_DEFAULT(height_scale, "Height Scale", "", 0, 0.1, float(0.1));
 		#include "used_float.fxh"
 	#endif
 
@@ -71,16 +54,13 @@ void pixel_pre_lighting(
 		float2 uv;
 		uv = pixel_shader_input.texcoord.xy;
 
-    float2 color_uv    = transform_texcoord(uv, color_transform);
-	shader_data.common.albedo = sample2DGamma(color, color_uv);
+	shader_data.common.albedo = sample2DGamma(color_map, transform_texcoord(uv, color_map_transform));
 	shader_data.common.albedo.rgb *= pow(surface_color_tint, .454545);	//power to fix h4 color gamma correction
 
-    float2 normal_uv    = transform_texcoord(uv, norm_transform);
-    shader_data.common.normal = sample_2d_normal_approx(norm, normal_uv);
+    shader_data.common.normal = sample_2d_normal_approx(normal_map, transform_texcoord(uv, normal_map_transform));
 	shader_data.common.normal = mul(shader_data.common.normal, shader_data.common.tangent_frame);
 
-	float2 masks_uv    = transform_texcoord(uv, masks_transform);
-	float4 pbr_masks = sample2DGamma(masks, masks_uv);
+	float4 pbr_masks = sample2DGamma(specular_map, transform_texcoord(uv, specular_map_transform));
 	shader_data.shader_params = pbr_masks;
 	shader_data.shader_params.a = (1-shader_data.shader_params.a) * roughness_scalar;// + roughness_bias;
 }
@@ -96,7 +76,7 @@ float4 pixel_lighting(
 	float3 diffuse = 0.0;
 	float3 specular = 0.0;
 	float NDV = 1.0f - saturate(dot((view_dir), normal));
-	float3 metalness_color = lerp(shader_params.rgb, float3(0.5,0.5,0.5), pow(NDV, 5));
+	//float3 shader_params.rgb = lerp(shader_params.rgb, float3(0.5,0.5,0.5), pow(NDV, 5));
 /*------------------------------------SPECULAR CALCULATION------------------------------------*/
 
 		//big thanks to the oomer for giving me an example on how to do these for loops!
@@ -106,8 +86,8 @@ float4 pixel_lighting(
 		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
 
 		//analytical lighting * light color * light intensity * f0
-		specular = calc_specular_ggx(shader_params.g, normal, light.rgb, view_dir) * color * light.a *
-		(metalness_color + ((1-metalness_color) * pow(1-dot(normalize(light.rgb + view_dir), normal), 5)));
+		specular = calc_specular_ggx(shader_params.a, normal, light.rgb, view_dir) * color * light.a *
+		(shader_params.rgb + ((1-shader_params.rgb) * pow(1-dot(normalize(light.rgb + view_dir), normal), 5)));
 	}
 
 
@@ -121,8 +101,8 @@ float4 pixel_lighting(
 			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
 
 			//final analytical lighting + VMF specular (indrect) * f0
-			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.g, normal, light, view_dir), i) *
-			(metalness_color + ((1-metalness_color) * pow(1-dot(normalize(light + view_dir), normal), 5)));
+			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.a, normal, light, view_dir), i) *
+			(shader_params.rgb + ((1-shader_params.rgb) * pow(1-dot(normalize(light + view_dir), normal), 5)));
 		}
 	}
 
@@ -134,9 +114,9 @@ float4 pixel_lighting(
 
 	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= pow(shader_params.a, roughness_bias) * 7; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
+	float lod				= pow(shader_params.a, .21f) * 6.5f; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
 	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-	float3 reflection		= diffuse * (reflectionMap.rgb * 4.59479) * reflectionMap.a * metalness_color; //4.59479 value is from H3's albedo.fx. thanks bungo
+	float3 reflection		= diffuse * (reflectionMap.rgb * 4.59479) * reflectionMap.a * lerp(shader_params.rgb, float3(0.5, 0.5, 0.5), pow(1-NDV,5)); //4.59479 value is from H3's albedo.fx. thanks bungo
 
 /*----------------------------------------FINAL OUTPUT----------------------------------------*/
     float4 out_color;
