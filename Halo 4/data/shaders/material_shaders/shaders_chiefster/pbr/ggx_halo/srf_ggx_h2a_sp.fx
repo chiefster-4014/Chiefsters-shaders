@@ -3,13 +3,13 @@ srf_ggx_h2a_sp.fx
 11/3/2024
 a custom ggx material model.
 by chiefster with help from chunch.
-alternate version that tries to emulate H2ASP's wack shader.
+alternate version that tries to emulate H2ASP's wack shader. very much still WIP
 ---------------------------------------------------------- */
 #include "core/core.fxh"
 #include "engine/engine_parameters.fxh"
 #include "lighting/lighting.fxh"
 #include "lighting/specular_model_ggx.fxh"
-
+#include "lighting/diffuse_model_oren_nayar.fxh"
 
 
 DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
@@ -87,7 +87,7 @@ float4 pixel_lighting(
 
 		//analytical lighting * light color * light intensity * f0
 		specular = calc_specular_ggx(shader_params.a, normal, light.rgb, view_dir) * color * light.a *
-		(shader_params.rgb + ((1-shader_params.rgb) * pow(1-dot(normalize(light.rgb + view_dir), normal), 5)));
+				get_fresnel_shlick(shader_params.rgb, normal, light.rgb + view_dir) * max(dot(normal, light.rgb), 0);
 	}
 
 
@@ -102,21 +102,21 @@ float4 pixel_lighting(
 
 			//final analytical lighting + VMF specular (indrect) * f0
 			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.a, normal, light, view_dir), i) *
-			(shader_params.rgb + ((1-shader_params.rgb) * pow(1-dot(normalize(light + view_dir), normal), 5)));
+				get_fresnel_shlick(shader_params.rgb, normal, light + view_dir) * max(dot(normal, light), 0);
 		}
 	}
 
 
 /*------------------------------------------DIFFUSE------------------------------------------*/
 
-	calc_diffuse_lambert(diffuse, shader_data.common, normal);
+	calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.a, normal);
 /*-----------------------------------------REFLECTION-----------------------------------------*/
-
+	float3 reflection = 0.0;
 	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= pow(shader_params.a, .21f) * 6.5f; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
+	float lod				= pow(shader_params.a, 0.34f) * 6.5f; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
 	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-	float3 reflection		= diffuse * (reflectionMap.rgb * 4.59479) * reflectionMap.a * lerp(shader_params.rgb, float3(0.5, 0.5, 0.5), pow(1-NDV,5)); //4.59479 value is from H3's albedo.fx. thanks bungo
+	reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(shader_params.rgb, normal, view_dir);
 
 /*----------------------------------------FINAL OUTPUT----------------------------------------*/
     float4 out_color;

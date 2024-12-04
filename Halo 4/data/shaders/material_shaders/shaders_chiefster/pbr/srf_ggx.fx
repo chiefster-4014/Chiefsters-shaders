@@ -8,15 +8,11 @@ by chiefster with help from chunch.
 #include "engine/engine_parameters.fxh"
 #include "lighting/lighting.fxh"
 #include "lighting/specular_model_ggx.fxh"
-
-
+#include "lighting/diffuse_model_oren_nayar.fxh"
 
 DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
 
-#if defined(H5_SUPPORT)
-	DECLARE_SAMPLER(control_map, "Control Map", "", "chiefster/bitmaps/default_control.bitmap")
-	#include "next_texture.fxh"
 #elif defined(H2AMP_SUPPORT)
 	DECLARE_SAMPLER(control_map, "Combo Map", "", "chiefster/bitmaps/default_combo.bitmap")
 	#include "next_texture.fxh"
@@ -41,25 +37,25 @@ DECLARE_SAMPLER(normal_map, "Normal Map", "", "shaders/default_bitmaps/bitmaps/d
 DECLARE_SAMPLER_CUBE(reflection_map, "Reflection Map", "", "shaders/default_bitmaps/bitmaps/default_cube.tif")
 #include "next_texture.fxh"
 
-DECLARE_RGB_COLOR_WITH_DEFAULT(surface_color_tint,	"", "", float3(1.0,1.0,1.0));
+DECLARE_RGB_COLOR_WITH_DEFAULT(surface_color_tint, "", "", float3(1.0,1.0,1.0));
 #include "used_float3.fxh"
-DECLARE_FLOAT_WITH_DEFAULT(roughness_scalar,	"", "", 0, 1.0, float(1.0));
+DECLARE_FLOAT_WITH_DEFAULT(roughness_scalar, "", "", 0, 1.0, float(1.0));
 #include "used_float.fxh"
-DECLARE_FLOAT_WITH_DEFAULT(roughness_bias,		"", "", 0, 1.0, float(0.0));
+DECLARE_FLOAT_WITH_DEFAULT(roughness_bias, "", "", 0, 1.0, float(0.0));
 #include "used_float.fxh"
 
 	#if !defined(COLORED_SPEC)
-		DECLARE_FLOAT_WITH_DEFAULT(metalness_scalar,	"", "", 0, 1.0, float(1.0));
+		DECLARE_FLOAT_WITH_DEFAULT(metalness_scalar, "", "", 0, 1.0, float(1.0));
 		#include "used_float.fxh"
-		DECLARE_FLOAT_WITH_DEFAULT(metalness_bias,		"", "", 0, 1.0, float(0.0));
+		DECLARE_FLOAT_WITH_DEFAULT(metalness_bias, "", "", 0, 1.0, float(0.0));
 		#include "used_float.fxh"
 	#endif
 
 DECLARE_BOOL_WITH_DEFAULT(detail_normals, "Detail Normals Enabled", "", false);
 #include "next_bool_parameter.fxh"
-DECLARE_SAMPLER(normal_detail_map,		"Detail Normal Map", "detail_normals", "shaders/default_bitmaps/bitmaps/default_normal.tif");
+DECLARE_SAMPLER(normal_detail_map, "Detail Normal Map", "detail_normals", "shaders/default_bitmaps/bitmaps/default_normal.tif");
 #include "next_texture.fxh"
-DECLARE_FLOAT_WITH_DEFAULT(detail_normal_intensity,		"", "detail_normals", 0, 1.0, float(1.0));
+DECLARE_FLOAT_WITH_DEFAULT(detail_normal_intensity, "", "detail_normals", 0, 1.0, float(1.0));
 #include "used_float.fxh"
 
 	#if defined(ARMOR_TEST)
@@ -97,6 +93,9 @@ DECLARE_FLOAT_WITH_DEFAULT(detail_normal_intensity,		"", "detail_normals", 0, 1.
 		DECLARE_FLOAT_WITH_DEFAULT(clip_threshold,		"", "", 0, 1.0, float(0.3));
 		#include "used_float.fxh"
 	#endif
+
+//DEBUG
+
 struct s_shader_data
 {
 	s_common_shader_data common;
@@ -126,7 +125,7 @@ void pixel_pre_lighting(
 	{
 		shader_data.shader_params.rgb = pbr_masks.rgb;
 		shader_data.shader_params.a = saturate((1 - pbr_masks.a) * roughness_scalar + roughness_bias);
-		shader_data.common.shaderValues.x = sample2DGamma(ao_map, transform_texcoord(uv, ao_map_transform)).g;
+		shader_data.common.shaderValues.x = sample2DGamma(ao_map, transform_texcoord(uv, ao_map_transform)).r;
 	}
 
 	#else
@@ -223,7 +222,7 @@ float4 pixel_lighting(
 	float3 diffuse = 0.0;
 	float3 specular = 0.0;
 
-	float NDV = saturate(dot((view_dir), normal));
+	float NDV = saturate(dot(view_dir, normal));
  /*-------------------------------------------SHADER-------------------------------------------*/
 
 	#if defined(COLORED_SPEC)
@@ -236,7 +235,8 @@ float4 pixel_lighting(
 	#if defined(USE_FRESNEL_MASK)
     {							//power to fix h4 color gamma correction 
 		float3 spec_colors = lerp(pow(normal_specular_tint, 0.454545), pow(glancing_specular_tint, 0.454545), pow(1-NDV, glancing_power)); //mix spec colors by view angle.
-		metalness_color = lerp(metalness_color, spec_colors, shader_params.a); //mask spec colors by spec color mask.
+		spec_colors = lerp(float3(1,1,1), spec_colors, shader_params.a); //mask spec colors by spec color mask.
+		metalness_color *= lerp(spec_colors, float3(1,1,1),  pow(1-NDV,5));
 	}
 	#endif
 
@@ -247,47 +247,40 @@ float4 pixel_lighting(
 	#endif
 
  /*------------------------------------SPECULAR CALCULATION------------------------------------*/
-
-		//big thanks to the oomer for giving me an example on how to do these for loops!
-	for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
-	{
-		float4 light = shader_data.common.lighting_data.light_direction_specular_scalar[i];
-		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
-
-		//analytical lighting * light color * light intensity * f0
-		specular = calc_specular_ggx(shader_params.g, normal, light.rgb, view_dir) * color * light.a *
-		(metalness_color + ((1-metalness_color) * pow(1-dot(normalize(light.rgb + view_dir), normal), 5)));
-	}
-
- /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
-
-	if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
-	{
-		for (uint i = 0; i < 2; i++)
+			//big thanks to the oomer for giving me an example on how to do these for loops!
+		for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
 		{
-			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
+			float4 light = shader_data.common.lighting_data.light_direction_specular_scalar[i];
+			float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
 
-			//final analytical lighting + VMF specular (indrect) * f0
-			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.g, normal, light, view_dir), i) *
-			(metalness_color + ((1-metalness_color) * pow(1-dot(normalize(light + view_dir), normal), 5)));
+			//analytical lighting * light color * light intensity * f0
+			specular = calc_specular_ggx(shader_params.g, normal, light.rgb, view_dir) * color * light.a *
+				get_fresnel_shlick(metalness_color, normal, light.rgb + view_dir) * max(dot(normal, light.rgb), 0);
 		}
-	}
+ /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
+		if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
+		{
+			for (uint i = 0; i < 2; i++)
+			{
+				float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
 
+				//final analytical lighting + VMF specular (indrect) * f0
+				specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.g, normal, light, view_dir), i) *
+				get_fresnel_shlick(metalness_color, normal, light + view_dir) * max(dot(normal, light), 0);
+			}
+		}
  /*------------------------------------------DIFFUSE------------------------------------------*/
-
-	calc_diffuse_lambert(diffuse, shader_data.common, normal);
-
+		calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.g, normal);
  /*-----------------------------------------REFLECTION-----------------------------------------*/
-
-	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
-	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= pow(shader_params.g, .21f) * 6.5; // Exponential for smoother mip progression. scalar attempts to push into proper baked cube mip range. 
-	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-	float3 reflection		= diffuse * (reflectionMap.rgb * 4.5) * reflectionMap.a * lerp(metalness_color, float3(0.5, 0.5, 0.5), pow(1-NDV,5));
-
+	float3 reflection = 0.0;
+		//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
+		float3 rVec				= reflect(-view_dir, normal);
+		float lod				= pow(shader_params.g, 0.34f) * 6.5f; // Exponential for smoother mip progression. scalar attempts to push into proper baked cube mip range. 
+		float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
+		reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(metalness_color, normal, view_dir);
  /*----------------------------------------FINAL OUTPUT----------------------------------------*/
 
-	float4 out_color;
+	float4 out_color = 0.0;
 	#if defined(COLORED_SPEC)
 	{
 		out_color.rgb = ((diffuse * albedo.rgb) + specular + reflection) * shader_data.common.shaderValues.x;
