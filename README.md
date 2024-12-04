@@ -1,11 +1,11 @@
 # Chiefsters-Shaders
 This is a repo for the shaders I've been making for the Halo editing kits.
-Currently only contains a custom shader for Halo 4: srf_ggx, but more will come over time.<br/>
+Currently contains shaders for Halo 4 and H2AMP, and more will come over time.<br/>
 
 ## Install instructions
 You can download a zip containing the data and tags, and from there just extract them into your H4EK directory. I've already compiled the shaders so they'll be be good to go.
 
-## Halo 4 shaders
+## Halo 4 & H2AMP shaders
 **srf_ggx**: A custom PBR material shader made for Halo 4, also compatible with Halo 2 Anniversary Multiplayer.<br/>
 Big thanks to Chunch for helping out with the main shader, and the oomer for giving me insight on how to the light array loops!
 
