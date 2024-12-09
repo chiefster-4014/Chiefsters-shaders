@@ -13,10 +13,7 @@ by chiefster with help from chunch.
 DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
 
-#elif defined(H2AMP_SUPPORT)
-	DECLARE_SAMPLER(control_map, "Combo Map", "", "chiefster/bitmaps/default_combo.bitmap")
-	#include "next_texture.fxh"
-#elif defined(COLORED_SPEC)
+#if defined(COLORED_SPEC)
 	DECLARE_SAMPLER(control_map, "Colored Specular Map", "", "shaders/default_bitmaps/bitmaps/default_spec.bitmap")
 	#include "next_texture.fxh"
 	DECLARE_SAMPLER(ao_map, "AO Map", "", "shaders/default_bitmaps/bitmaps/color_white.bitmap")
@@ -114,14 +111,8 @@ void pixel_pre_lighting(
 	float4 pbr_masks = sample2DGamma(control_map, transform_texcoord(uv, control_map_transform));
 
 	//define supported mask type
-	#if defined(H2AMP_SUPPORT) //same mask type as Unity standard for some reason
-	{
-		shader_data.shader_params.r	= pbr_masks.g;
-		shader_data.shader_params.g	= saturate((1 - pbr_masks.a) * roughness_scalar + roughness_bias);
-		shader_data.shader_params.b	= saturate(pbr_masks.r + metalness_bias);
-	}
 
-	#elif defined(COLORED_SPEC) //assumes spec-gloss
+	#if defined(COLORED_SPEC) //assumes spec-gloss
 	{
 		shader_data.shader_params.rgb = pbr_masks.rgb;
 		shader_data.shader_params.a = saturate((1 - pbr_masks.a) * roughness_scalar + roughness_bias);
@@ -218,18 +209,17 @@ float4 pixel_lighting(
 	float4 shader_params = shader_data.shader_params;
     float3 normal = shader_data.common.normal;
 	float3 view_dir = -shader_data.common.view_dir_distance.xyz;
-
 	float3 diffuse = 0.0;
 	float3 specular = 0.0;
-
+	float3 reflection = 0.0;
+	float4 out_color = 0.0;
 	float NDV = saturate(dot(view_dir, normal));
- /*-------------------------------------------SHADER-------------------------------------------*/
-
 	#if defined(COLORED_SPEC)
 		float3 metalness_color = max(shader_params.rgb, 0.1);
+		shader_params.g = shader_params.a;
 	#else
-		//mix f0 and albedo by metalness.
-		float3 metalness_color = lerp(float3(0.06,0.06,0.06), albedo.rgb, shader_params.b);
+		//mix f0 and albedo by metalness. f0 is 0.12 because it looked closer to Blender.
+		float3 metalness_color = lerp(float3(0.12,0.12,0.12), albedo.rgb, shader_params.b);
 	#endif
 
 	#if defined(USE_FRESNEL_MASK)
@@ -239,48 +229,40 @@ float4 pixel_lighting(
 		metalness_color *= lerp(spec_colors, float3(1,1,1),  pow(1-NDV,5));
 	}
 	#endif
-
-	#if defined(COLORED_SPEC)
-	{
-		shader_params.g = shader_params.a;
-	}
-	#endif
-
  /*------------------------------------SPECULAR CALCULATION------------------------------------*/
-			//big thanks to the oomer for giving me an example on how to do these for loops!
-		for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
-		{
-			float4 light = shader_data.common.lighting_data.light_direction_specular_scalar[i];
-			float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
+	//big thanks to the oomer for giving me an example on how to do these for loops!
+	for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
+	{
+		float4 light = shader_data.common.lighting_data.light_direction_specular_scalar[i];
+		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
 
-			//analytical lighting * light color * light intensity * f0
-			specular = calc_specular_ggx(shader_params.g, normal, light.rgb, view_dir) * color * light.a *
-				get_fresnel_shlick(metalness_color, normal, light.rgb + view_dir) * max(dot(normal, light.rgb), 0);
-		}
+		//analytical lighting * light color * light intensity * f0
+		specular = calc_specular_ggx_new(shader_params.g, normal, light.rgb, view_dir, metalness_color) * color * light.a *
+		get_fresnel_shlick(metalness_color, normal, light.rgb + view_dir);
+	}
  /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
-		if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
+	if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
+	{
+		for (uint i = 0; i < 2; i++)
 		{
-			for (uint i = 0; i < 2; i++)
-			{
-				float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
+			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
 
-				//final analytical lighting + VMF specular (indrect) * f0
-				specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.g, normal, light, view_dir), i) *
-				get_fresnel_shlick(metalness_color, normal, light + view_dir) * max(dot(normal, light), 0);
-			}
+			//final analytical lighting + VMF specular (indrect) * f0
+			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx_new(shader_params.g, normal, light, view_dir, metalness_color), i) *
+			get_fresnel_shlick(metalness_color, normal, light + view_dir);
 		}
+	}
  /*------------------------------------------DIFFUSE------------------------------------------*/
 		calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.g, normal);
  /*-----------------------------------------REFLECTION-----------------------------------------*/
-	float3 reflection = 0.0;
+	{
 		//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 		float3 rVec				= reflect(-view_dir, normal);
-		float lod				= pow(shader_params.g, 0.34f) * 6.5f; // Exponential for smoother mip progression. scalar attempts to push into proper baked cube mip range. 
+		float lod				= float_remap(pow(shader_params.g, .454545), 0, 1, 0, 8); // Exponential for smoother mip progression. remap attempts to push into proper mip range for 256x cubes. 
 		float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
 		reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(metalness_color, normal, view_dir);
+	}
  /*----------------------------------------FINAL OUTPUT----------------------------------------*/
-
-	float4 out_color = 0.0;
 	#if defined(COLORED_SPEC)
 	{
 		out_color.rgb = ((diffuse * albedo.rgb) + specular + reflection) * shader_data.common.shaderValues.x;
@@ -294,9 +276,7 @@ float4 pixel_lighting(
 		clip(albedo.a - clip_threshold);
 	#endif
 	out_color.a = albedo.a;
-
  /*-----------------------------------------SELF-ILLUM-----------------------------------------*/
-
 	#if defined(SELFILLUM)
 		if (AllowSelfIllum(shader_data.common))
 		{

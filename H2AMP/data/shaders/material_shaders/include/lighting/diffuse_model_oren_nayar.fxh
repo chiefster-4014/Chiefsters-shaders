@@ -50,7 +50,7 @@ void calc_diffuse_oren_nayar_inner_loop(
         float A = 1.0 + sigma2 * (albedo / (sigma2 + 0.13) + 0.5 / (sigma2 + 0.33));
         float B = 0.45 * sigma2 / (sigma2 + 0.09);
 
-        diffuse += (max(0.0, NdotL) * (A + B * s / t) / 3.14159) * intensity_diffuse_scalar.rgb * intensity_diffuse_scalar.a;
+        diffuse += max((max(0.0, NdotL) * (A + B * s / t) / 3.14159) * intensity_diffuse_scalar.rgb * intensity_diffuse_scalar.a, 0);
 }
 
 // build the loop

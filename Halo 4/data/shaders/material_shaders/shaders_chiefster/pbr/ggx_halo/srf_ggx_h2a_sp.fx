@@ -3,7 +3,8 @@ srf_ggx_h2a_sp.fx
 11/3/2024
 a custom ggx material model.
 by chiefster with help from chunch.
-alternate version that tries to emulate H2ASP's wack shader. very much still WIP
+alternate version that tries to emulate H2ASP's wack shader.
+very much still WIP.
 ---------------------------------------------------------- */
 #include "core/core.fxh"
 #include "engine/engine_parameters.fxh"
@@ -76,9 +77,7 @@ float4 pixel_lighting(
 	float3 diffuse = 0.0;
 	float3 specular = 0.0;
 	float NDV = 1.0f - saturate(dot((view_dir), normal));
-	//float3 shader_params.rgb = lerp(shader_params.rgb, float3(0.5,0.5,0.5), pow(NDV, 5));
 /*------------------------------------SPECULAR CALCULATION------------------------------------*/
-
 		//big thanks to the oomer for giving me an example on how to do these for loops!
 	for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
 	{
@@ -86,14 +85,10 @@ float4 pixel_lighting(
 		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
 
 		//analytical lighting * light color * light intensity * f0
-		specular = calc_specular_ggx(shader_params.a, normal, light.rgb, view_dir) * color * light.a *
+		specular = calc_specular_ggx_new(shader_params.a, normal, light.rgb, view_dir, shader_params.rgb) * color * light.a *
 				get_fresnel_shlick(shader_params.rgb, normal, light.rgb + view_dir) * max(dot(normal, light.rgb), 0);
 	}
-
-
 /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
-
-
 	if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
 	{
 		for (uint i = 0; i < 2; i++)
@@ -101,20 +96,17 @@ float4 pixel_lighting(
 			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
 
 			//final analytical lighting + VMF specular (indrect) * f0
-			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx(shader_params.a, normal, light, view_dir), i) *
+			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx_new(shader_params.a, normal, light, view_dir, shader_params.rgb), i) *
 				get_fresnel_shlick(shader_params.rgb, normal, light + view_dir) * max(dot(normal, light), 0);
 		}
 	}
-
-
 /*------------------------------------------DIFFUSE------------------------------------------*/
-
 	calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.a, normal);
 /*-----------------------------------------REFLECTION-----------------------------------------*/
 	float3 reflection = 0.0;
 	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= pow(shader_params.a, 0.34f) * 6.5f; // Exponential for smoother mip progression. scalar to push into proper baked cube mip range (256 res cubes have 8 mips)
+	float lod				= float_remap(pow(shader_params.g, .454545), 0, 1, 0, 8); // Exponential for smoother mip progression. remap attempts to push into proper mip range for 256x cubes. 
 	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
 	reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(shader_params.rgb, normal, view_dir);
 
