@@ -10,6 +10,8 @@ swaps pbr mask channels with h2a mp channels.
 #include "lighting/lighting.fxh"
 #include "lighting/specular_model_ggx.fxh"
 #include "lighting/diffuse_model_oren_nayar.fxh"
+#include "lighting/reflectionstuff.fxh"
+
 
 DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
@@ -153,8 +155,8 @@ float4 pixel_lighting(
 	float4 out_color;
 	float NDV = saturate(dot(view_dir, normal));
 
-	//mix f0 and albedo by metalness. f0 is 0.12 because it looked closer to Blender.
-	float3 metalness_color = lerp(float3(0.12,0.12,0.12), albedo.rgb, shader_params.b);
+	//mix f0 and albedo by metalness.
+	float3 metalness_color = lerp(float3(0.04,0.04,0.04), albedo.rgb, shader_params.b);
  /*------------------------------------SPECULAR CALCULATION------------------------------------*/
 		//big thanks to the oomer for giving me an example on how to do these for loops!
 	for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
@@ -163,8 +165,7 @@ float4 pixel_lighting(
 		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
 
 		//analytical lighting * light color * light intensity * f0
-		specular = calc_specular_ggx_new(shader_params.g, normal, light.rgb, view_dir, metalness_color) * color * light.a *
-			get_fresnel_shlick(metalness_color, normal, light.rgb + view_dir) * max(dot(normal, light.rgb), 0);
+		specular = calc_specular_ggx_new(shader_params.g, normal, light.rgb, view_dir, metalness_color) * color * light.a * max(dot(normal, light.rgb), 0);
 	}
  /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
 	if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
@@ -174,18 +175,24 @@ float4 pixel_lighting(
 			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
 
 			//final analytical lighting + VMF specular (indrect) * f0
-			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx_new(shader_params.g, normal, light, view_dir, metalness_color), i) *
-			get_fresnel_shlick(metalness_color, normal, light + view_dir) * max(dot(normal, light), 0);
+			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data,
+			calc_specular_ggx_new(shader_params.g, normal, light, view_dir, metalness_color), i) * max(dot(normal, light), 0);
 		}
 	}
  /*------------------------------------------DIFFUSE------------------------------------------*/
-	calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.g, normal);
+	calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, (1 / sqrt(2)) * atan(shader_params.g), normal, metalness_color);
  /*-----------------------------------------REFLECTION-----------------------------------------*/
-	//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
-	float3 rVec				= reflect(-view_dir, normal);
-	float lod				= float_remap(pow(shader_params.g, .454545), 0, 1, 0, 8); // Exponential for smoother mip progression. remap attempts to push into proper mip range for 256x cubes. 
-	float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-	reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(metalness_color, normal, view_dir);
+ 		//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
+	{
+		float3 envmap_area_specular_only = 0.0;
+
+    	calc_prebake_envtint(envmap_area_specular_only, shader_data.common, shader_data.common.normal, float2(0.45, 0.55), metalness_color, 1.0, 5);
+		float3 rVec				= reflect(-view_dir, normal);
+		float lod				= float_remap(pow(shader_params.g, .454545), 0, 1, 0, 8); // Exponential for smoother mip progression. remap attempts to push into proper mip range for 256x cubes. 
+		float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
+		reflection				= envmap_area_specular_only * reflectionMap.rgb * (reflectionMap.a + 1.0) * FresnelSchlickWithRoughness(metalness_color, NDV, 1-shader_params.g);
+	}																			/*small reflection boost. looked good while testing, but will
+																				remove if it ends up making reflections too bright for others.*/
  /*----------------------------------------FINAL OUTPUT----------------------------------------*/
 	out_color.rgb = ((diffuse * albedo.rgb * (1-shader_params.b)) + specular + reflection) * shader_params.r;
 	out_color.a = albedo.a;

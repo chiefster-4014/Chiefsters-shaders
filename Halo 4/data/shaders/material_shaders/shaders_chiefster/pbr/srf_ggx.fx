@@ -9,6 +9,7 @@ by chiefster with help from chunch.
 #include "lighting/lighting.fxh"
 #include "lighting/specular_model_ggx.fxh"
 #include "lighting/diffuse_model_oren_nayar.fxh"
+#include "lighting/reflectionstuff.fxh"
 
 DECLARE_SAMPLER(color_map, "Albedo Map", "", "shaders/default_bitmaps/bitmaps/default_diff.bitmap")
 #include "next_texture.fxh"
@@ -106,7 +107,7 @@ void pixel_pre_lighting(
 	float2 uv = pixel_shader_input.texcoord.xy;
 
 	shader_data.common.albedo = sample2DGamma(color_map, transform_texcoord(uv, color_map_transform));
-	shader_data.common.albedo.rgb *= pow(surface_color_tint, .454545);	//power to fix h4 color gamma correction
+	shader_data.common.albedo.rgb *= pow(surface_color_tint, .454545);	//power to "fix" h4 color gamma correction
 
 	float4 pbr_masks = sample2DGamma(control_map, transform_texcoord(uv, control_map_transform));
 
@@ -214,31 +215,33 @@ float4 pixel_lighting(
 	float3 reflection = 0.0;
 	float4 out_color = 0.0;
 	float NDV = saturate(dot(view_dir, normal));
+	//calculate F0/metalness_color.
 	#if defined(COLORED_SPEC)
-		float3 metalness_color = max(shader_params.rgb, 0.1);
+		float3 metalness_color = max(shader_params.rgb, 0.04); //test so that the textures don't always kill the specular if they end up black due to compression, etc.
 		shader_params.g = shader_params.a;
 	#else
-		//mix f0 and albedo by metalness. f0 is 0.12 because it looked closer to Blender.
-		float3 metalness_color = lerp(float3(0.12,0.12,0.12), albedo.rgb, shader_params.b);
+		//mix base F0 and albedo by metalness.
+		float3 metalness_color = lerp(float3(0.04,0.04,0.04), albedo.rgb, shader_params.b);
 	#endif
 
 	#if defined(USE_FRESNEL_MASK)
-    {							//power to fix h4 color gamma correction 
+    {							//power to "fix" h4 color gamma correction. may remove if it causes issues later on.
 		float3 spec_colors = lerp(pow(normal_specular_tint, 0.454545), pow(glancing_specular_tint, 0.454545), pow(1-NDV, glancing_power)); //mix spec colors by view angle.
 		spec_colors = lerp(float3(1,1,1), spec_colors, shader_params.a); //mask spec colors by spec color mask.
 		metalness_color *= lerp(spec_colors, float3(1,1,1),  pow(1-NDV,5));
 	}
 	#endif
  /*------------------------------------SPECULAR CALCULATION------------------------------------*/
-	//big thanks to the oomer for giving me an example on how to do these for loops!
+	/*calculate specular. should place all of this into a .fxh file for cleanliness.
+	big thanks to the oomer for giving me an example on how to do these for loops!*/
 	for (uint i = 0; i < shader_data.common.lighting_data.light_component_count; i++)
 	{
 		float4 light = shader_data.common.lighting_data.light_direction_specular_scalar[i];
 		float3 color = shader_data.common.lighting_data.light_intensity_diffuse_scalar[i].rgb;
+		float NDL = max(dot(normal, light.rgb), 0.0);
 
-		//analytical lighting * light color * light intensity * f0
-		specular = calc_specular_ggx_new(shader_params.g, normal, light.rgb, view_dir, metalness_color) * color * light.a *
-		get_fresnel_shlick(metalness_color, normal, light.rgb + view_dir);
+		//OLI'S COMMENT: Changed it so it multiplies by NDL at the end instead of fresnel. Fresnel shouldn't be here anyway.
+		specular = calc_specular_ggx_new(shader_params.g, normal, light.rgb, view_dir, metalness_color) * color * light.a * NDL;
 	}
  /*-------------------------------IN-DIRECT SPECULAR CALCULATION-------------------------------*/
 	if (shader_data.common.lighting_mode != LM_PER_PIXEL_FLOATING_SHADOW_SIMPLE && shader_data.common.lighting_mode != LM_PER_PIXEL_SIMPLE)
@@ -246,22 +249,26 @@ float4 pixel_lighting(
 		for (uint i = 0; i < 2; i++)
 		{
 			float3 light = VMFGetVector(shader_data.common.lighting_data.vmf_data, i);
+			float NDL = max(dot(normal, light), 0.0);
 
-			//final analytical lighting + VMF specular (indrect) * f0
-			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data, calc_specular_ggx_new(shader_params.g, normal, light, view_dir, metalness_color), i) *
-			get_fresnel_shlick(metalness_color, normal, light + view_dir);
+			specular += VMFSpecularCustomEvaluate3(shader_data.common.lighting_data.vmf_data,
+			calc_specular_ggx_new(shader_params.g, normal, light, view_dir, metalness_color), i) * NDL;
 		}
 	}
  /*------------------------------------------DIFFUSE------------------------------------------*/
-		calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, shader_params.g, normal);
+		calc_diffuse_oren_nayar(diffuse, shader_data.common, albedo.rgb, (1 / sqrt(2)) * atan(shader_params.g), normal, metalness_color);
  /*-----------------------------------------REFLECTION-----------------------------------------*/
+ 		//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
 	{
-		//calculate reflection. roughness controls blurriness of cubemap. (won't look correct if cubemap only has a few mipmaps.)
+		float3 envmap_area_specular_only = 0.0;
+
+    	calc_prebake_envtint(envmap_area_specular_only, shader_data.common, shader_data.common.normal, float2(0.45, 0.55), metalness_color, 1.0, 5);
 		float3 rVec				= reflect(-view_dir, normal);
 		float lod				= float_remap(pow(shader_params.g, .454545), 0, 1, 0, 8); // Exponential for smoother mip progression. remap attempts to push into proper mip range for 256x cubes. 
 		float4 reflectionMap	= sampleCUBELOD(reflection_map, rVec, lod);
-		reflection				= diffuse * reflectionMap.rgb * reflectionMap.a * get_fresnel_shlick(metalness_color, normal, view_dir);
-	}
+		reflection				= envmap_area_specular_only * reflectionMap.rgb * (reflectionMap.a + 1.0) * FresnelSchlickWithRoughness(metalness_color, NDV, 1-shader_params.g);
+	}																			/*small reflection boost. looked good while testing, but will
+																				remove if it ends up making reflections too bright for others.*/
  /*----------------------------------------FINAL OUTPUT----------------------------------------*/
 	#if defined(COLORED_SPEC)
 	{
